@@ -279,6 +279,26 @@ type BackendConfigSpec struct {
 
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// +optional
+	State BackendConfigStateSpec `json:"state,omitempty"`
+}
+
+// BackendConfigStateSpec allows the user to set ForceUnlock
+type BackendConfigStateSpec struct {
+	// ForceUnlock a Terraform state if it has become locked for any reason.
+	//
+	// Leave this empty to do nothing, set this to the value of the `Lock Info: ID: [value]`,
+	// e.g. `f2ab685b-f84d-ac0b-a125-378a22877e8d`, to force unlock the state and
+	// finally set this to `auto` to have the state lock automatically unlocked.
+	//
+	// WARNING: Only use `auto` in the cases where you are absolutely certain that
+	// no other system is using this state, you could otherwise end up in a bad place
+	// See https://www.terraform.io/language/state/locking#force-unlock for more
+	// information on the terraform state lock and force unlock.
+	//
+	// +optional
+	ForceUnlock string `json:"forceUnlock,omitempty"`
 }
 
 const (
@@ -288,11 +308,11 @@ const (
 	DisabledValue             = "disabled"
 	ApprovePlanAutoValue      = "auto"
 	ApprovePlanDisableValue   = "disable"
+	StateForceUnlockAutoValue = "auto"
 
 	// ArtifactFailedReason represents the fact that the
 	// source artifact download failed.
-	ArtifactFailedReason = "ArtifactFailed"
-
+	ArtifactFailedReason       = "ArtifactFailed"
 	TFExecNewFailedReason      = "TFExecNewFailed"
 	TFExecInitFailedReason     = "TFExecInitFailed"
 	VarsGenerationFailedReason = "VarsGenerationFailed"
@@ -505,6 +525,19 @@ func TerraformHealthCheckSucceeded(terraform Terraform, message string) Terrafor
 		Type:    "HealthCheck",
 		Status:  metav1.ConditionTrue,
 		Reason:  "HealthChecksSucceed",
+		Message: trimString(message, MaxConditionMessageLength),
+	}
+	apimeta.SetStatusCondition(terraform.GetStatusConditions(), newCondition)
+	return terraform
+}
+
+// TerraformForceUnlock will set a new condition on the Terraform resource indicating
+// that the resource has been locked and we are attempting to force unlock it.
+func TerraformForceUnlock(terraform Terraform, message string) Terraform {
+	newCondition := metav1.Condition{
+		Type:    "ForceUnlock",
+		Status:  metav1.ConditionUnknown,
+		Reason:  "StateLocked",
 		Message: trimString(message, MaxConditionMessageLength),
 	}
 	apimeta.SetStatusCondition(terraform.GetStatusConditions(), newCondition)
