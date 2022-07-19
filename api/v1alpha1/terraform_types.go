@@ -281,7 +281,7 @@ type BackendConfigSpec struct {
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// +optional
-	State BackendConfigStateSpec `json:"state,omitempty"`
+	State *BackendConfigStateSpec `json:"state,omitempty"`
 }
 
 // BackendConfigStateSpec allows the user to set ForceUnlock
