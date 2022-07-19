@@ -61,8 +61,9 @@ func newRootCommand() *cobra.Command {
 	rootCmd.AddCommand(buildSuspendCmd(app))
 	rootCmd.AddCommand(buildResumeCmd(app))
 	rootCmd.AddCommand(buildGetGroup(app))
-	rootCmd.AddCommand(buildDeleteCommand(app))
+	rootCmd.AddCommand(buildDeleteCmd(app))
 	rootCmd.AddCommand(buildCreateCmd(app))
+	rootCmd.AddCommand(buildForceUnlockCmd(app))
 
 	return rootCmd
 }
@@ -256,7 +257,7 @@ var deleteExamples = `
   tfctl delete my-resource
 `
 
-func buildDeleteCommand(app *tfctl.CLI) *cobra.Command {
+func buildDeleteCmd(app *tfctl.CLI) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "delete NAME",
 		Short:   "Delete a Terraform resource",
@@ -307,4 +308,28 @@ func configureDefaultNamespace() {
 	if fromEnv != "" {
 		kubeconfigArgs.Namespace = &fromEnv
 	}
+}
+
+var forceUnlockExample = `
+	# Unlock Terraform resource "aws-security-group" with lock id "f2ab685b-f84d-ac0b-a125-378a22877e8d" in the default namespace
+	tfctl force-unlock aws-security-group -n default --lock-id="f2ab685b-f84d-ac0b-a125-378a22877e8d"
+`
+
+func buildForceUnlockCmd(app *tfctl.CLI) *cobra.Command {
+	forceUnlock := &cobra.Command{
+		Use:     "force-unlock",
+		Short:   "Force unlock a locked Terraform State",
+		Example: strings.Trim(forceUnlockExample, "\n"),
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return app.ForceUnlock(
+				os.Stdout,
+				args[0],
+				viper.GetString("lock-id"),
+			)
+		},
+	}
+	forceUnlock.Flags().String("lock-id", "", "Set the lock-id that currently holds the lock of the terraform state e.g. f2ab685b-f84d-ac0b-a125-378a22877e8d")
+	viper.BindPFlags(forceUnlock.Flags())
+	return forceUnlock
 }
