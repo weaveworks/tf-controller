@@ -42,3 +42,5 @@ example/
 
 # OS files
 **/.DS_Store
+/oc-operator/node_modules/
+/oc-operator/tf-controller/*/

@@ -1,0 +1,14 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: custom-tf-controller
+  namespace: flux-system
+spec:
+  displayName: custom-tf-controller
+  description: custom-tf-controller
+  publisher: custom-tf-controller
+  sourceType: grpc
+  image: quay.io/openshift-fluxv2-poc/tf-controller-index:latest
+  updateStrategy:
+    registryPoll:
+      interval: 1m

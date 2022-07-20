@@ -1,0 +1,8 @@
+{
+  "name": "oc-operator",
+  "version": "1.0.0",
+  "dependencies": {
+    "glob": "^7.1.6",
+    "yaml": "^1.10.0"
+  }
+}

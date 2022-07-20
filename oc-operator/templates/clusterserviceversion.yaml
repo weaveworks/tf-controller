@@ -1,0 +1,259 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  name: tf-controller.v0.9.0
+  namespace: flux-system
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "infra.contrib.fluxcd.io/v1alpha1",
+          "kind": "Terraform",
+          "metadata": {
+              "name": "helloworld-tf",
+              "namespace": "flux-system"
+          },
+          "spec": {
+              "interval": "5m",
+              "approvePlan": "auto",
+              "path": "./",
+              "sourceRef": {
+                "kind": "GitRepository",
+                "name": "helloworld",
+                "namespace": "flux-system"
+              }      
+          }
+        }
+      ]
+    capabilities: Seamless Upgrades
+    categories: Integration & Delivery
+    certified: "false"
+    description: |-
+      Weave TF-controller is a Flux controller that brings GitOps to Terraform resources.
+    support: Weaveworks
+    operatorframework.io/suggested-namespace: flux-system
+spec:
+  version: 0.9.0
+  maturity: alpha
+  keywords: ["weave", "flux", "cd", "continuous delivery", "terraform", "gitops"]
+  displayName: "Weave GitOps Terraform Controller"
+  provider:
+    name: Weaveworks
+  labels:
+    name: tf-controller
+  selector:
+    matchLabels:
+      name: tf-controller
+  links:
+    - name: Weave GitOps Terraform Controller
+      url: https://github.com/weaveworks/tf-controller
+    - name: Documentation
+      url: https://weaveworks.github.io/tf-controller/
+  customresourcedefinitions:
+    owned:
+      - name: infra.contrib.fluxcd.io
+        displayName: Terraform
+        kind: Terraform
+        version: v1alpha1
+        description: Terraform
+  description: |-
+    **Weave GitOps Terraform Controller** (aka Weave TF-controller) is a Flux controller for reconciling Terraform resources in the GitOps way. 
+    With the power of Flux together with Terraform, TF-controller allows you to GitOps-ify infrastructure, 
+    and application resources, in the Kubernetes and Terraform universe, together at your own pace.
+    
+    TF-controller offers many GitOps models:
+      1. **GitOps Automation Model:** GitOps your Terraform resources from the provision steps to the enforcement steps, like a whole EKS cluster.
+      2. **Hybrid GitOps Automation Model:** GitOps parts of your existing infrastructure resources. For example, you have an existing EKS cluster. You can choose to GitOps only its nodegroup, or its security group.
+      3. **State Enforcement Model:** You have a TFSTATE file, and you'd like to use GitOps enforce it, without changing anything else.
+      4. **Drift Detection Model:** You have a TFSTATE file, and you'd like to use GitOps just for drift detection, so you can decide to do things later when a drift occurs.
+
+    Features
+      * GitOps Automation for Terraform
+      * Drift detection
+      * Plan and Manual Approve
+  icon:
+    - base64data: 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
+      mediatype: image/png
+  install:
+    spec:
+      clusterPermissions:
+        - rules:
+          - apiGroups:
+            - ""
+            resources:
+            - configmaps
+            - secrets
+            - serviceaccounts
+            verbs:
+            - get
+            - list
+            - watch
+          - apiGroups:
+            - ""
+            resources:
+            - events
+            verbs:
+            - create
+            - patch
+          - apiGroups:
+            - infra.contrib.fluxcd.io
+            resources:
+            - terraforms
+            verbs:
+            - create
+            - delete
+            - get
+            - list
+            - patch
+            - update
+            - watch
+          - apiGroups:
+            - infra.contrib.fluxcd.io
+            resources:
+            - terraforms/finalizers
+            verbs:
+            - create
+            - delete
+            - get
+            - patch
+            - update
+          - apiGroups:
+            - infra.contrib.fluxcd.io
+            resources:
+            - terraforms/status
+            verbs:
+            - get
+            - patch
+            - update
+          - apiGroups:
+            - source.toolkit.fluxcd.io
+            resources:
+            - buckets
+            - gitrepositories
+            verbs:
+            - get
+            - list
+            - watch
+          - apiGroups:
+            - source.toolkit.fluxcd.io
+            resources:
+            - buckets/status
+            - gitrepositories/status
+            verbs:
+            - get
+          - apiGroups:
+            - security.openshift.io
+            resourceNames:
+            - nonroot
+            resources:
+            - securitycontextconstraints
+            verbs:
+            - use
+          serviceAccountName: tf-controller
+        - rules:
+            - apiGroups:
+                - ""
+              resources:
+                - configmaps
+                - secrets
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+                - delete
+            - apiGroups:
+                - coordination.k8s.io
+              resources:
+                - leases
+              verbs:
+                - get
+                - list
+                - watch
+                - create
+                - update
+                - patch
+                - delete
+          serviceAccountName: tf-runner
+      deployments:
+        - name: tf-controller
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                control-plane: tf-controller
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/default-container: manager
+                labels:
+                  control-plane: tf-controller
+              spec:
+                containers:
+                - args:
+                  - --watch-all-namespaces
+                  - --log-level=info
+                  - --log-encoding=json
+                  - --enable-leader-election
+                  - --concurrent=1
+                  command:
+                  - /sbin/tini
+                  - --
+                  - tf-controller
+                  env:
+                  - name: RUNTIME_NAMESPACE
+                    valueFrom:
+                      fieldRef:
+                        fieldPath: metadata.namespace
+                  - name: RUNNER_POD_IMAGE
+                    value: weaveworks/tf-runner
+                  image: ghcr.io/weaveworks/tf-controller:v0.9.0-rc.3
+                  imagePullPolicy: IfNotPresent
+                  livenessProbe:
+                    httpGet:
+                      path: /healthz
+                      port: healthz
+                  name: manager
+                  ports:
+                  - containerPort: 8080
+                    name: http-prom
+                  - containerPort: 9440
+                    name: healthz
+                    protocol: TCP
+                  readinessProbe:
+                    httpGet:
+                      path: /readyz
+                      port: healthz
+                  resources:
+                    limits:
+                      cpu: 1000m
+                      memory: 1Gi
+                    requests:
+                      cpu: 200m
+                      memory: 64Mi
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    readOnlyRootFilesystem: true
+                  volumeMounts:
+                  - mountPath: /tmp
+                    name: temp
+                securityContext:
+                  fsGroup: 1337
+                serviceAccountName: tf-controller
+                terminationGracePeriodSeconds: 10
+                volumes:
+                - emptyDir: {}
+                  name: temp
+    strategy: deployment
+  installModes:
+  - type: OwnNamespace
+    supported: true
+  - type: SingleNamespace
+    supported: true
+  - type: MultiNamespace
+    supported: true
+  - type: AllNamespaces
+    supported: true
+  minKubeVersion: 1.19.0

@@ -1,0 +1,11 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: tf-controller-subscription
+  namespace: flux-system
+spec:
+  channel: stable
+  name: tf-controller
+  startingCSV: tf-controller.v0.9.0-rc.8
+  source: custom-tf-controller
+  sourceNamespace: flux-system

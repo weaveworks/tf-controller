@@ -1,0 +1,17 @@
+FROM alpine:3.12
+
+WORKDIR /opt
+RUN wget https://download.docker.com/linux/static/stable/x86_64/docker-20.10.6.tgz
+RUN tar xf docker-20.10.6.tgz
+
+RUN wget https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.6.28/opm-linux-4.6.28.tar.gz
+RUN tar xf opm-linux-4.6.28.tar.gz
+
+FROM centos:8
+
+WORKDIR /opt
+
+COPY --from=0 /opt/docker/docker /usr/bin/
+COPY --from=0 /opt/opm /opt/
+
+ENTRYPOINT ["/opt/opm"]

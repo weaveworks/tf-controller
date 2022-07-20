@@ -205,3 +205,4 @@ release-manifests:
 	kustomize build ./config/crd > ./config/release/tf-controller.crds.yaml
 	kustomize build ./config/rbac > ./config/release/tf-controller.rbac.yaml
 	kustomize build ./config/manager > ./config/release/tf-controller.deployment.yaml
+	(cd ./config/release && yq e . tf-controller.crds.yaml tf-controller.deployment.yaml tf-controller.rbac.yaml > tf-controller.all.yaml)

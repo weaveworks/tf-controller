@@ -1,0 +1,8 @@
+---
+# Use `replaces-mode` or `semver-mode`. Once you switch to `semver-mode`, there is no easy way back.
+updateGraph: semver-mode
+addReviewers: true
+
+# A list of reviewers to be added to pull requests (GitHub user name)
+reviewers:
+  - chanwit
