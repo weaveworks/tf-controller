@@ -21,7 +21,7 @@ func (c *CLI) ForceUnlock(out io.Writer, resource, lockID string) error {
 		Namespace: c.namespace,
 	}
 
-	err := setForceUnlockAndReconcile(context.TODO(), c.client, key, lockID)
+	err := c.setForceUnlockAndReconcile(context.TODO(), c.client, out, key, lockID)
 
 	if err != nil {
 		return err
@@ -31,7 +31,7 @@ func (c *CLI) ForceUnlock(out io.Writer, resource, lockID string) error {
 	return nil
 }
 
-func setForceUnlockAndReconcile(ctx context.Context, kubeClient client.Client, out io.Writer, namespacedName types.NamespacedName, lockID string) error {
+func (c *CLI) setForceUnlockAndReconcile(ctx context.Context, kubeClient client.Client, out io.Writer, namespacedName types.NamespacedName, lockID string) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() (err error) {
 		terraform := &infrav1.Terraform{}
 
@@ -55,9 +55,9 @@ func setForceUnlockAndReconcile(ctx context.Context, kubeClient client.Client, o
 			} else {
 				if terraform.Spec.BackendConfig.State.ForceUnlock != infrav1.StateForceUnlockAutoValue {
 					terraform.Spec.BackendConfig.State.ForceUnlock = lockID
-					fmt.Fprintf(out, " Setting ForceUnlock to '%s' on resource %s/%s\n", lockID, c.namespace, resource)
+					fmt.Fprintf(out, " Setting ForceUnlock to '%s' on resource %s/%s\n", lockID, c.namespace, namespacedName.Name)
 				} else {
-					fmt.Fprintf(out, " ForceUnlock set to '%s' on resource %s/%s\n", infrav1.StateForceUnlockAutoValue, c.namespace, resource)
+					fmt.Fprintf(out, " ForceUnlock set to '%s' on resource %s/%s\n", infrav1.StateForceUnlockAutoValue, c.namespace, namespacedName.Name)
 				}
 			}
 		}
