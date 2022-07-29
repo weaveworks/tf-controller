@@ -1,8 +1,9 @@
 package controllers
 
 import (
-	"github.com/weaveworks/tf-controller/utils"
 	"testing"
+
+	"github.com/weaveworks/tf-controller/utils"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 	. "github.com/onsi/gomega"
@@ -91,6 +92,7 @@ func Test_000052_plan_and_manual_approve_with_files_test(t *testing.T) {
 	Given("a Terraform resource with manual approval, attached to the given GitRepository resource")
 	By("creating a new TF resource without specifying the .spec.approvePlan field.")
 	By("attaching the TF resource to the repo via `sourceRef`.")
+	inClusterConfig := false
 	helloWorldTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -99,7 +101,7 @@ func Test_000052_plan_and_manual_approve_with_files_test(t *testing.T) {
 		Spec: infrav1.TerraformSpec{
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			// Note that we do not specify the `ApprovePlan` field

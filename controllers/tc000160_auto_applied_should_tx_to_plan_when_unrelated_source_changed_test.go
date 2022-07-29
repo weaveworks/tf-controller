@@ -91,6 +91,7 @@ func Test_000160_auto_applied_should_tx_to_plan_when_unrelated_source_changed_te
 
 	Given("a Terraform resource with auto approve, attached to the given GitRepository resource.")
 	By("creating a new TF resource and attaching to the repo via `sourceRef`.")
+	inClusterConfig := false
 	helloWorldTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -101,7 +102,7 @@ func Test_000160_auto_applied_should_tx_to_plan_when_unrelated_source_changed_te
 			Path:        "./tf-k8s-configmap",
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			SourceRef: infrav1.CrossNamespaceSourceReference{

@@ -642,30 +642,64 @@ func (r *TerraformReconciler) setupTerraform(ctx context.Context, runnerClient r
 	workingDir := uploadAndExtractReply.WorkingDir
 	tmpDir = uploadAndExtractReply.TmpDir
 
-	var backendConfig string
+	// Set the backendConfig assuming it is going to be disabled
+	var backendConfig string = `
+terraform {
+	backend "local" { }
+}
+`
+	// This variable is going to be used to force unlock the state if it is locked
+	forceUnlockID := ""
+	// Check if we want to Disable the K8S backend via an envvar
 	DisableTFK8SBackend := os.Getenv("DISABLE_TF_K8S_BACKEND") == "1"
 
+	// Do we have a manually configured backend
 	if terraform.Spec.BackendConfig != nil {
-		backendConfig = fmt.Sprintf(`
+		// Is the backend still enabled
+		if !terraform.Spec.BackendConfig.Disable {
+			// If we have an lock id we want to force unlock the state
+			if terraform.Spec.BackendConfig.State != nil {
+				if terraform.Spec.BackendConfig.State.ForceUnlock != "" {
+					forceUnlockID = terraform.Spec.BackendConfig.State.ForceUnlock
+				}
+			}
+
+			// Set a default suffix if it is not set
+			if terraform.Spec.BackendConfig.SecretSuffix == "" {
+				terraform.Spec.BackendConfig.SecretSuffix = terraform.Name
+			}
+
+			// Default to true if InClusterConfig is not set
+			if terraform.Spec.BackendConfig.InClusterConfig == nil {
+				icc := true
+				terraform.Spec.BackendConfig.InClusterConfig = &icc
+			}
+
+			// The config path is only required if we're not setting up an InClusterConfig
+			configPath := ""
+
+			// If it's not empty then we want to create the string that will be dropped into the config
+			if terraform.Spec.BackendConfig.ConfigPath != "" {
+				configPath = fmt.Sprintf("\n    config_path       = \"%s\"", terraform.Spec.BackendConfig.ConfigPath)
+			}
+
+			// Setup the config, note the %v and %s together for in_cluster_config
+			backendConfig = fmt.Sprintf(`
 terraform {
   backend "kubernetes" {
     secret_suffix     = "%s"
-    in_cluster_config = %v
-    config_path       = "%s"
+    in_cluster_config = %v%s
     namespace         = "%s"
   }
 }
 `,
-			terraform.Spec.BackendConfig.SecretSuffix,
-			terraform.Spec.BackendConfig.InClusterConfig,
-			terraform.Spec.BackendConfig.ConfigPath,
-			terraform.Namespace)
-	} else if DisableTFK8SBackend && terraform.Spec.BackendConfig == nil {
-		backendConfig = `
-terraform {
-	backend "local" { }
-}`
-	} else if terraform.Spec.BackendConfig == nil {
+				terraform.Spec.BackendConfig.SecretSuffix,
+				terraform.Spec.BackendConfig.InClusterConfig,
+				configPath,
+				terraform.Namespace)
+		}
+		// This else should only be hit if we don't disable the backend via the envvar above
+	} else if !DisableTFK8SBackend {
 		// TODO must be tested in cluster only
 		backendConfig = fmt.Sprintf(`
 terraform {
@@ -676,6 +710,17 @@ terraform {
   }
 }
 `, terraform.Name, terraform.Namespace)
+	}
+
+	// If we have a lock id need to force unlock it
+	if forceUnlockID != "" {
+		_, err := runnerClient.ForceUnlock(context.Background(), &runner.ForceUnlockRequest{
+			LockIdentifier: forceUnlockID,
+		})
+
+		if err != nil {
+			return terraform, tfInstance, tmpDir, err
+		}
 	}
 
 	if r.backendCompletelyDisable(terraform) {
