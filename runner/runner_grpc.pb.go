@@ -43,6 +43,7 @@ type RunnerClient interface {
 	Init(ctx context.Context, in *InitRequest, opts ...grpc.CallOption) (*InitReply, error)
 	Upload(ctx context.Context, in *UploadRequest, opts ...grpc.CallOption) (*UploadReply, error)
 	FinalizeSecrets(ctx context.Context, in *FinalizeSecretsRequest, opts ...grpc.CallOption) (*FinalizeSecretsReply, error)
+	ForceUnlock(ctx context.Context, in *ForceUnlockRequest, opts ...grpc.CallOption) (*ForceUnlockReply, error)
 }
 
 type runnerClient struct {
@@ -242,6 +243,15 @@ func (c *runnerClient) FinalizeSecrets(ctx context.Context, in *FinalizeSecretsR
 	return out, nil
 }
 
+func (c *runnerClient) ForceUnlock(ctx context.Context, in *ForceUnlockRequest, opts ...grpc.CallOption) (*ForceUnlockReply, error) {
+	out := new(ForceUnlockReply)
+	err := c.cc.Invoke(ctx, "/runner.Runner/ForceUnlock", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerServer is the server API for Runner service.
 // All implementations must embed UnimplementedRunnerServer
 // for forward compatibility
@@ -267,6 +277,7 @@ type RunnerServer interface {
 	Init(context.Context, *InitRequest) (*InitReply, error)
 	Upload(context.Context, *UploadRequest) (*UploadReply, error)
 	FinalizeSecrets(context.Context, *FinalizeSecretsRequest) (*FinalizeSecretsReply, error)
+	ForceUnlock(context.Context, *ForceUnlockRequest) (*ForceUnlockReply, error)
 	mustEmbedUnimplementedRunnerServer()
 }
 
@@ -336,6 +347,9 @@ func (UnimplementedRunnerServer) Upload(context.Context, *UploadRequest) (*Uploa
 }
 func (UnimplementedRunnerServer) FinalizeSecrets(context.Context, *FinalizeSecretsRequest) (*FinalizeSecretsReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method FinalizeSecrets not implemented")
+}
+func (UnimplementedRunnerServer) ForceUnlock(context.Context, *ForceUnlockRequest) (*ForceUnlockReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ForceUnlock not implemented")
 }
 func (UnimplementedRunnerServer) mustEmbedUnimplementedRunnerServer() {}
 
@@ -728,6 +742,24 @@ func _Runner_FinalizeSecrets_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Runner_ForceUnlock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForceUnlockRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServer).ForceUnlock(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/runner.Runner/ForceUnlock",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServer).ForceUnlock(ctx, req.(*ForceUnlockRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Runner_ServiceDesc is the grpc.ServiceDesc for Runner service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -818,6 +850,10 @@ var Runner_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FinalizeSecrets",
 			Handler:    _Runner_FinalizeSecrets_Handler,
+		},
+		{
+			MethodName: "ForceUnlock",
+			Handler:    _Runner_ForceUnlock_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

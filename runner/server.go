@@ -5,12 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	tfjson "github.com/hashicorp/terraform-json"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	tfjson "github.com/hashicorp/terraform-json"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/fluxcd/pkg/untar"
@@ -793,4 +794,9 @@ func (r *TerraformRunnerServer) FinalizeSecrets(ctx context.Context, req *Finali
 	}
 
 	return &FinalizeSecretsReply{Message: "ok"}, nil
+}
+
+func (r *TerraformRunnerServer) ForceUnlock(ctx context.Context, req *ForceUnlockRequest) (*ForceUnlockReply, error) {
+	r.tf.ForceUnlock(ctx, req.LockIdentifier)
+	return nil, nil
 }
