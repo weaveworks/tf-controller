@@ -269,10 +269,10 @@ type BackendConfigSpec struct {
 	Disable bool `json:"disable"`
 
 	// +optional
-	SecretSuffix string `json:"secretSuffix"`
+	SecretSuffix string `json:"secretSuffix,omitempty"`
 
 	// +optional
-	InClusterConfig bool `json:"inClusterConfig"`
+	InClusterConfig *bool `json:"inClusterConfig,omitempty"`
 
 	// +optional
 	ConfigPath string `json:"configPath,omitempty"`
