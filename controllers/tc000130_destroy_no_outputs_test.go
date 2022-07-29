@@ -83,6 +83,7 @@ func Test_000130_destroy_no_outputs_test(t *testing.T) {
 
 	Given("a Terraform object with auto approve, and attaching it to the GitRepository object")
 	By("creating a new TF resource and attaching to the repo via sourceRef")
+	inClusterConfig := false
 	helloWorldTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -91,7 +92,7 @@ func Test_000130_destroy_no_outputs_test(t *testing.T) {
 		Spec: infrav1.TerraformSpec{
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			ApprovePlan: "auto",

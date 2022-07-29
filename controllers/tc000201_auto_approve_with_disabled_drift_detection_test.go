@@ -77,6 +77,7 @@ func Test_000201_auto_approve_with_disabled_drift_detection(t *testing.T) {
 	testEnvKubeConfigPath, err := findKubeConfig(testEnv)
 	g.Expect(err).Should(BeNil())
 
+	inClusterConfig := false
 	helloWorldTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -89,7 +90,7 @@ func Test_000201_auto_approve_with_disabled_drift_detection(t *testing.T) {
 			Path:                  "./terraform-hello-world-example",
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			SourceRef: infrav1.CrossNamespaceSourceReference{

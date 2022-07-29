@@ -419,6 +419,7 @@ func Test_000260_runner_pod_test_env_vars_proxy_output(t *testing.T) {
 	By("creating a new TF resource and attaching to the repo via `sourceRef`.")
 	By("specifying the .spec.writeOutputsToSecret.")
 
+	inClusterConfig := false
 	helloWorldTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -428,7 +429,7 @@ func Test_000260_runner_pod_test_env_vars_proxy_output(t *testing.T) {
 			ApprovePlan: "auto",
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			Path: "./terraform-envvar-variable-output",

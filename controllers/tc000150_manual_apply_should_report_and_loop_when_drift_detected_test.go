@@ -78,6 +78,7 @@ func Test_000150_manual_apply_should_report_and_loop_when_drift_detected_test(t 
 
 	Given("a Terraform object with auto approve, and attaching it to the GitRepository object")
 	By("creating a new TF resource and attaching to the repo via sourceRef")
+	inClusterConfig := false
 	helloWorldTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -86,7 +87,7 @@ func Test_000150_manual_apply_should_report_and_loop_when_drift_detected_test(t 
 		Spec: infrav1.TerraformSpec{
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			ApprovePlan: "",

@@ -74,6 +74,23 @@ spec:
                     type: object
                   secretSuffix:
                     type: string
+                  state:
+                    description: BackendConfigStateSpec allows the user to set ForceUnlock
+                    properties:
+                      forceUnlock:
+                        description: "ForceUnlock a Terraform state if it has become
+                          locked for any reason. \n Leave this empty to do nothing,
+                          set this to the value of the `Lock Info: ID: [value]`, e.g.
+                          `f2ab685b-f84d-ac0b-a125-378a22877e8d`, to force unlock
+                          the state and finally set this to `auto` to have the state
+                          lock automatically unlocked. \n WARNING: Only use `auto`
+                          in the cases where you are absolutely certain that no other
+                          system is using this state, you could otherwise end up in
+                          a bad place See https://www.terraform.io/language/state/locking#force-unlock
+                          for more information on the terraform state lock and force
+                          unlock."
+                        type: string
+                    type: object
                 type: object
               cliConfigSecretRef:
                 description: SecretReference represents a Secret Reference. It has

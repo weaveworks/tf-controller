@@ -80,6 +80,7 @@ func Test_000241_auto_approve_with_health_checks_test(t *testing.T) {
 	testEnvKubeConfigPath, err := findKubeConfig(testEnv)
 	g.Expect(err).Should(BeNil())
 
+	inClusterConfig := false
 	healthCheckTF := infrav1.Terraform{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      terraformName,
@@ -91,7 +92,7 @@ func Test_000241_auto_approve_with_health_checks_test(t *testing.T) {
 			Path:        "./tf-health-check-example",
 			BackendConfig: &infrav1.BackendConfigSpec{
 				SecretSuffix:    terraformName,
-				InClusterConfig: false,
+				InClusterConfig: &inClusterConfig,
 				ConfigPath:      testEnvKubeConfigPath,
 			},
 			SourceRef: infrav1.CrossNamespaceSourceReference{

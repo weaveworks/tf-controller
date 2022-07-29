@@ -30,6 +30,7 @@ service Runner {
   rpc Upload(UploadRequest) returns (UploadReply) {}
 
   rpc FinalizeSecrets(FinalizeSecretsRequest) returns (FinalizeSecretsReply) {}
+  rpc ForceUnlock(ForceUnlockRequest) returns (ForceUnlockReply) {}
 }
 
 message LookPathRequest {
@@ -247,4 +248,13 @@ message FinalizeSecretsRequest {
 message FinalizeSecretsReply {
   string message = 1;
   bool   notFound = 2;
+}
+
+message ForceUnlockRequest {
+  string lockIdentifier = 1;
+}
+
+message ForceUnlockReply {
+  string message = 1;
+  bool   success = 2;
 }
