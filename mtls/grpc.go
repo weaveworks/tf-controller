@@ -1,46 +1,36 @@
 package mtls
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	infrav1 "github.com/weaveworks/tf-controller/api/v1alpha1"
+	"net"
+
 	"github.com/weaveworks/tf-controller/runner"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"net"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 )
 
 // StartGRPCServerForTesting should be used only for testing
-func StartGRPCServerForTesting(ctx context.Context, server *runner.TerraformRunnerServer, namespace string, addr string, mgr controllerruntime.Manager, rotator *CertRotator) error {
+func StartGRPCServerForTesting(server *runner.TerraformRunnerServer, namespace string, addr string, mgr controllerruntime.Manager, rotator *CertRotator) error {
 	// wait for the certs to be available and the manager to be ready
 	<-rotator.Ready
 	<-mgr.Elected()
 
-	tlsSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      infrav1.RunnerTLSSecretName,
-			Labels: map[string]string{
-				infrav1.RunnerLabel: namespace,
-			},
-		},
+	trigger := Trigger{
+		Namespace: namespace,
+		Ready:     make(chan *TriggerResult),
 	}
 
-	if err := rotator.GenerateRunnerCertForNamespace(ctx, namespace, tlsSecret); err != nil {
-		return err
+	rotator.TriggerNamespaceTLSGeneration <- trigger
+	result := <-trigger.Ready
+	if result.Err != nil {
+		return result.Err
 	}
 
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil
-	}
-
-	creds, err := GetGRPCServerCredentials(tlsSecret)
+	creds, err := GetGRPCServerCredentials(result.Secret)
 	if err != nil {
 		return err
 	}
@@ -50,6 +40,10 @@ func StartGRPCServerForTesting(ctx context.Context, server *runner.TerraformRunn
 	// local runner, use the same client as the manager
 	runner.RegisterRunnerServer(grpcServer, server)
 
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil
+	}
 	if err := grpcServer.Serve(listener); err != nil {
 		return err
 	}
@@ -61,7 +55,7 @@ func StartGRPCServerForTesting(ctx context.Context, server *runner.TerraformRunn
 func GetGRPCClientCredentials(secret *corev1.Secret) (credentials.TransportCredentials, error) {
 	ca, cert, err := buildArtifactsFromSecret(secret)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build artifacts from secret: %v", err)
+		return nil, fmt.Errorf("failed to build artifacts from Secret: %v", err)
 	}
 
 	certPool := x509.NewCertPool()
@@ -69,13 +63,13 @@ func GetGRPCClientCredentials(secret *corev1.Secret) (credentials.TransportCrede
 		return nil, fmt.Errorf("failed to add client CA")
 	}
 
-	serverCert, err := tls.X509KeyPair(cert.CertPEM, cert.KeyPEM)
+	runnerCert, err := tls.X509KeyPair(cert.CertPEM, cert.KeyPEM)
 	if err != nil {
 		return nil, err
 	}
 
 	config := &tls.Config{
-		Certificates: []tls.Certificate{serverCert},
+		Certificates: []tls.Certificate{runnerCert},
 		RootCAs:      certPool,
 	}
 
@@ -86,7 +80,7 @@ func GetGRPCClientCredentials(secret *corev1.Secret) (credentials.TransportCrede
 func GetGRPCServerCredentials(secret *corev1.Secret) (credentials.TransportCredentials, error) {
 	ca, cert, err := buildArtifactsFromSecret(secret)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build artifacts from secret: %v", err)
+		return nil, fmt.Errorf("failed to build artifacts from Secret: %v", err)
 	}
 
 	certPool := x509.NewCertPool()

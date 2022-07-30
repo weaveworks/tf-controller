@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/pkg/errors"
 	"html/template"
 	"io"
 	"net"
@@ -100,15 +101,13 @@ type TerraformReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.10.0/pkg/reconcile
 func (r *TerraformReconciler) Reconcile(ctx context.Context, req ctrl.Request) (retResult ctrl.Result, retErr error) {
 
-	// Should be blocked if cert is not ready yet
 	<-r.CertRotator.Ready
 
-	if r.CertRotator.IsCertReady(ctx) == false {
-		// Trigger the CA rotation
-		if len(r.CertRotator.TriggerCARotation) < cap(r.CertRotator.TriggerCARotation) {
-			r.CertRotator.TriggerCARotation <- struct{}{}
-		}
-		return ctrl.Result{Requeue: true}, fmt.Errorf("server cert not ready yet")
+	isCAValid, err := r.CertRotator.IsCAValid()
+	if isCAValid == false && r.CertRotator.TriggerCARotation != nil {
+		readyCh := make(chan *mtls.TriggerResult)
+		r.CertRotator.TriggerCARotation <- mtls.Trigger{Namespace: "", Ready: readyCh}
+		<-readyCh
 	}
 
 	log := ctrl.LoggerFrom(ctx)
@@ -721,7 +720,6 @@ terraform {
 		&runner.LookPathRequest{
 			File: "terraform",
 		})
-	execPath := lookPathReply.ExecPath
 	if err != nil {
 		err = fmt.Errorf("cannot find Terraform binary: %s in %s", err, os.Getenv("PATH"))
 		return infrav1.TerraformNotReady(
@@ -731,6 +729,7 @@ terraform {
 			err.Error(),
 		), tfInstance, tmpDir, err
 	}
+	execPath := lookPathReply.ExecPath
 
 	newTerraformReply, err := runnerClient.NewTerraform(ctx,
 		&runner.NewTerraformRequest{
@@ -1572,6 +1571,12 @@ func (r *TerraformReconciler) finalize(ctx context.Context, terraform infrav1.Te
 }
 
 func (r *TerraformReconciler) LookupOrCreateRunner(ctx context.Context, terraform infrav1.Terraform) (runner.RunnerClient, func() error, error) {
+	return r.lookupOrCreateRunner_000(ctx, terraform)
+}
+
+//lookupOrCreateRunner_000
+func (r *TerraformReconciler) lookupOrCreateRunner_000(ctx context.Context, terraform infrav1.Terraform) (runner.RunnerClient, func() error, error) {
+	// we have to make sure that the secret is valid before we can create the runner.
 	err := r.reconcileRunnerSecret(ctx, &terraform)
 	if err != nil {
 		return nil, nil, err
@@ -1588,19 +1593,7 @@ func (r *TerraformReconciler) LookupOrCreateRunner(ctx context.Context, terrafor
 		hostname = terraform.GetRunnerHostname(podIP)
 	}
 
-	tlsCertValid, err := r.validateTLSCertWithHostname(ctx, terraform, hostname)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !tlsCertValid {
-		err := r.reconcileRunnerSecret(ctx, &terraform)
-		if err != nil {
-			return nil, nil, err
-		}
-
-	}
-
-	conn, err := r.getRunnerConnection(ctx, terraform, hostname, r.RunnerGRPCPort)
+	conn, err := r.getRunnerConnection(terraform, hostname, r.RunnerGRPCPort)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1609,121 +1602,24 @@ func (r *TerraformReconciler) LookupOrCreateRunner(ctx context.Context, terrafor
 	return runnerClient, connClose, nil
 }
 
-func (r *TerraformReconciler) validateTLSCertWithHostname(ctx context.Context, terraform infrav1.Terraform, hostname string) (bool, error) {
-	var (
-		foundTLSCert bool
-		isCertValid  bool
-	)
-
-	// load the current TLS cert form the target namespace for the validation step
-	tlsSecretKey := types.NamespacedName{Namespace: terraform.Namespace, Name: infrav1.RunnerTLSSecretName}
-	tlsSecret := corev1.Secret{}
-
-	if err := r.Client.Get(ctx, tlsSecretKey, &tlsSecret); err != nil {
-		if apierrors.IsNotFound(err) {
-			foundTLSCert = false
-		} else {
-			return false, err
-		}
-	} else {
-		foundTLSCert = true
+func (r *TerraformReconciler) getRunnerConnection(terraform infrav1.Terraform, hostname string, port int) (*grpc.ClientConn, error) {
+	// blocks until the tls cert is valid
+	trigger := mtls.Trigger{
+		Namespace: terraform.Namespace,
+		Ready:     make(chan *mtls.TriggerResult),
 	}
 
-	if foundTLSCert {
-		// ensure the cert is valid and refresh when required
-		lookaheadInterval := time.Now().Add(r.CertRotator.LookaheadInterval)
+	r.CertRotator.TriggerNamespaceTLSGeneration <- trigger
+	result := <-trigger.Ready
 
-		var err error
-		isCertValid, err = mtls.ValidCert(tlsSecret.Data["ca.crt"], tlsSecret.Data["tls.crt"], tlsSecret.Data["tls.key"], hostname, lookaheadInterval)
-		if err != nil {
-			return false, fmt.Errorf("failed to validate cert before opening runner connection: %w", err)
-		}
-	} else {
-		isCertValid = false
-	}
-
-	return isCertValid, nil
-}
-
-func (r *TerraformReconciler) getRunnerConnection(ctx context.Context, terraform infrav1.Terraform, hostname string, port int) (*grpc.ClientConn, error) {
-	var (
-		foundTLSCert bool
-		isCertValid  bool
-	)
-
-	// load the current TLS cert form the target namespace for the validation step
-	tlsSecretKey := types.NamespacedName{Namespace: terraform.Namespace, Name: infrav1.RunnerTLSSecretName}
-	tlsSecret := corev1.Secret{}
-
-	if err := r.Client.Get(ctx, tlsSecretKey, &tlsSecret); err != nil {
-		if apierrors.IsNotFound(err) {
-			foundTLSCert = false
-		} else {
-			return nil, err
-		}
-	} else {
-		foundTLSCert = true
-	}
-
-	if foundTLSCert {
-		// ensure the cert is valid and refresh when required
-		lookaheadInterval := time.Now().Add(r.CertRotator.LookaheadInterval)
-
-		var err error
-		isCertValid, err = mtls.ValidCert(tlsSecret.Data["ca.crt"], tlsSecret.Data["tls.crt"], tlsSecret.Data["tls.key"], hostname, lookaheadInterval)
-		if err != nil {
-			return nil, fmt.Errorf("failed to validate cert before opening runner connection: %w", err)
-		}
-	} else {
-		isCertValid = false
-		tlsSecret = corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: terraform.Namespace,
-				Name:      infrav1.RunnerTLSSecretName,
-			},
-		}
-	}
-
-	// if the cert is not valid, refresh it, recreate the pod and wait for the ip to
-	// be available before connecting
-	if !isCertValid {
-		if err := r.CertRotator.GenerateRunnerCertForNamespace(ctx, terraform.Namespace, &tlsSecret); err != nil {
-			return nil, fmt.Errorf("failed to refresh cert before opening runner connection: %w", err)
-		}
-
-		var runnerPod corev1.Pod
-		if err := r.Get(ctx, getRunnerPodObjectKey(terraform), &runnerPod); err != nil {
-			return nil, fmt.Errorf("failed to obtain pod for re-creation: %w", err)
-		}
-
-		if err := r.Delete(ctx, &runnerPod); err != nil {
-			return nil, fmt.Errorf("failed to restart runner pod: %w", err)
-		}
-
-		const (
-			interval = time.Second * 5
-			timeout  = time.Second * 60
-		)
-
-		if wait.PollImmediate(interval, timeout, func() (bool, error) {
-			var runnerPod corev1.Pod
-			if err := r.Get(ctx, getRunnerPodObjectKey(terraform), &runnerPod); err != nil {
-				return false, fmt.Errorf("failed to get runner pod: %w", err)
-			}
-			if runnerPod.Status.PodIP != "" {
-				return true, nil
-			}
-			return false, nil
-		}) != nil {
-			return nil, fmt.Errorf("failed to restart runner pod: timeout")
-		}
-
-		podIP := runnerPod.Status.PodIP
-		hostname = terraform.GetRunnerHostname(podIP)
+	tlsSecret := result.Secret
+	err := result.Err
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tls secret: %w", err)
 	}
 
 	addr := fmt.Sprintf("%s:%d", hostname, port)
-	credentials, err := mtls.GetGRPCClientCredentials(&tlsSecret)
+	credentials, err := mtls.GetGRPCClientCredentials(tlsSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -1890,34 +1786,32 @@ func (r *TerraformReconciler) templateParse(content map[string]string, text stri
 	return b.String(), nil
 }
 
-// reconcileRunnerSecret reconciles the runner secret used for mtls
+// reconcileRunnerSecret reconciles the runner secret used for mTLS
 //
 // It should create the secret if it doesn't exist and then verify that the cert is valid
 // if the cert is not present in the secret or is invalid, it will generate a new cert and
 // write it to the secret. One secret per namespace is created in order to sidestep the need
 // for specifying a pod ip in the certificate SAN field.
 func (r *TerraformReconciler) reconcileRunnerSecret(ctx context.Context, terraform *infrav1.Terraform) error {
-	tlsSecret := corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: terraform.Namespace,
-			Name:      infrav1.RunnerTLSSecretName,
-			Labels: map[string]string{
-				infrav1.RunnerLabel: terraform.Namespace,
-			},
-		},
-	}
+	log := ctrl.LoggerFrom(ctx)
 
-	// this hostname will be used to generate a cert valid
-	// for all pods in the given namespace
-	if err := r.CertRotator.GenerateRunnerCertForNamespace(ctx, terraform.Namespace, &tlsSecret); err != nil {
-		return err
+	log.Info("trigger namespace tls secret generation")
+
+	trigger := mtls.Trigger{
+		Namespace: terraform.Namespace,
+		Ready:     make(chan *mtls.TriggerResult),
+	}
+	r.CertRotator.TriggerNamespaceTLSGeneration <- trigger
+
+	result := <-trigger.Ready
+	if result.Err != nil {
+		return errors.Wrap(result.Err, "failed to get tls generation result")
 	}
 
 	return nil
 }
 
 func (r *TerraformReconciler) reconcileRunnerPod(ctx context.Context, terraform infrav1.Terraform) (string, error) {
-
 	runnerPodTemplate := runnerPodTemplate(terraform)
 
 	runnerPod := *runnerPodTemplate.DeepCopy()
@@ -1933,7 +1827,8 @@ func (r *TerraformReconciler) reconcileRunnerPod(ctx context.Context, terraform 
 		interval = time.Second * 3
 		timeout  = time.Second * 60
 	)
-	// wait for pod to be completely deleted
+
+	// if the old pod has been terminating, wait for it to be deleted.
 	if err == nil && runnerPod.DeletionTimestamp != nil {
 		podErr := wait.PollImmediate(interval, timeout, func() (bool, error) {
 			err = r.Get(ctx, runnerPodKey, &runnerPod)
@@ -2059,12 +1954,20 @@ func (r *TerraformReconciler) runnerPodSpec(terraform infrav1.Terraform) corev1.
 	vFalse := false
 	vTrue := true
 	vUser := int64(65532)
+	tlsSecretName, err := r.CertRotator.GetRunnerTLSSecretName()
+	if err != nil {
+		tlsSecretName = infrav1.RunnerTLSSecretName
+	}
+
 	return corev1.PodSpec{
 		TerminationGracePeriodSeconds: gracefulTermPeriod,
 		Containers: []corev1.Container{
 			{
-				Name:            "tf-runner",
-				Args:            []string{"--grpc-port", fmt.Sprintf("%d", r.RunnerGRPCPort)},
+				Name: "tf-runner",
+				Args: []string{
+					"--grpc-port", fmt.Sprintf("%d", r.RunnerGRPCPort),
+					"--tls-secret-name", tlsSecretName,
+				},
 				Image:           getRunnerPodImage(terraform.Spec.RunnerPodTemplate.Spec.Image),
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports: []corev1.ContainerPort{

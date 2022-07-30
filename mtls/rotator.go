@@ -12,33 +12,20 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
 	infrav1 "github.com/weaveworks/tf-controller/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
-
-// Heavily based on and inspired by https://github.com/open-policy-agent/cert-controller
-
-// process should be:
-// ca rotates on controller startup --if flag is specified
-// creates the ca and controller cert
-// then finds all runner certs and rotates them
-// ca refreshes on a long interval once every 7 days
-// server cert and runner certs refresh on a configurable interval
-// runner certs rotate when the runner starts or after configurable interval 30 minutes
-
-//TODO:
-// when ca is rotated rotate any labelled secrets
-// before creating a grpc client, do a cert check and if within the lookahead time rotate
 
 const (
 	certName   = "tls.crt"
@@ -48,37 +35,93 @@ const (
 )
 
 var crLog = logf.Log.WithName("cert-rotation")
-
 var _ manager.Runnable = &CertRotator{}
+
+/*
+// SyncingReader is a reader that needs syncing prior to being usable.
+type SyncingReader interface {
+	client.Reader
+	WaitForCacheSync(ctx context.Context) bool
+}*/
+
+// PartialManager is a subset of the manager.Manager interface that is used by the CertRotator.
+type PartialManager interface {
+	GetConfig() *rest.Config
+	GetScheme() *runtime.Scheme
+	GetRESTMapper() meta.RESTMapper
+	Elected() <-chan struct{}
+}
 
 // KeyPairArtifacts stores cert artifacts.
 type KeyPairArtifacts struct {
-	Cert    *x509.Certificate
-	Key     *rsa.PrivateKey
-	CertPEM []byte
-	KeyPEM  []byte
+	Cert       *x509.Certificate
+	Key        *rsa.PrivateKey
+	CertPEM    []byte
+	KeyPEM     []byte
+	validUntil time.Time
+}
+
+type artifact struct {
+	ca         *KeyPairArtifacts
+	certSecret *corev1.Secret
+}
+
+type TriggerResult struct {
+	Secret *corev1.Secret
+	Err    error
+}
+
+type Trigger struct {
+	Namespace string
+	Ready     chan *TriggerResult
 }
 
 // CertRotator contains cert artifacts and a channel to close when the certs are ready.
 type CertRotator struct {
-	client                 client.Client
-	SecretKey              types.NamespacedName
-	CAName                 string
-	CAOrganization         string
-	DNSName                string
-	mgr                    manager.Manager
-	Ready                  chan struct{}
-	CAValidityDuration     time.Duration
-	CertValidityDuration   time.Duration
+	writer client.Client
+	mgr    manager.Manager
+
+	extKeyUsages *[]x509.ExtKeyUsage
+	Ready        chan struct{}
+
+	CAName             string
+	CAOrganization     string
+	DNSName            string
+	CAValidityDuration time.Duration
+	// CertValidityDuration   time.Duration
 	RotationCheckFrequency time.Duration
 	LookaheadInterval      time.Duration
-	TriggerCARotation      chan struct{}
+
+	TriggerCARotation             chan Trigger // trigger the CA rotation
+	TriggerNamespaceTLSGeneration chan Trigger // trigger namespace TLS generation
+
+	artifactCaches         []*artifact
+	knownNamespaceTLSMap   map[string]*TriggerResult
+	knownNamespaceTLSMapMu sync.Mutex
 }
 
-// AddRotator adds the CertRotator to the manager
+func (cr *CertRotator) GetTLSGenerationResult(namespace string) (*corev1.Secret, error) {
+	cr.knownNamespaceTLSMapMu.Lock()
+	defer cr.knownNamespaceTLSMapMu.Unlock()
+
+	result := cr.knownNamespaceTLSMap[namespace]
+	if result == nil {
+		return nil, errors.New("no TLS generation result")
+	}
+
+	return result.Secret, result.Err
+}
+
+// AddRotator adds the CertRotator and ReconcileWH to the manager.
 func AddRotator(ctx context.Context, mgr manager.Manager, cr *CertRotator) error {
-	cr.client = mgr.GetClient()
+	if mgr == nil || cr == nil {
+		return fmt.Errorf("nil arguments")
+	}
+
+	cr.writer = mgr.GetClient() // TODO make overrideable
 	cr.mgr = mgr
+	cr.knownNamespaceTLSMap = make(map[string]*TriggerResult)
+
 	if err := mgr.Add(cr); err != nil {
 		return err
 	}
@@ -86,256 +129,200 @@ func AddRotator(ctx context.Context, mgr manager.Manager, cr *CertRotator) error
 	return nil
 }
 
+// IsCAValid checks that the CA[n-1] is valid.
+func (cr *CertRotator) IsCAValid() (bool, error) {
+	n := len(cr.artifactCaches)
+	if n == 0 {
+		return false, errors.New("no CA in the cache")
+	}
+
+	validUntil := cr.artifactCaches[n-1].ca.validUntil
+	if validUntil.Before(cr.lookaheadTime()) {
+		return true, nil
+	}
+
+	return false, nil
+}
+
 // Start starts the CertRotator runnable to rotate certs and ensure the certs are ready.
 func (cr *CertRotator) Start(ctx context.Context) error {
-	// OK the leader do cert rotation.
-	// if we're not the leader, we're blocked here and don't do any cert rotation
+	// Only the leader do cert rotation.
+	// if we're not, we're blocked here and don't do any cert rotation until we becomes the leader.
 	<-cr.mgr.Elected()
 
-	crLog.Info("starting cert rotator controller")
-	defer crLog.Info("stopping cert rotator controller")
+	cr.extKeyUsages = &[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 
 	// explicitly rotate on the first round so that the certificate
-	// can be bootstrapped, otherwise manager exits before a cert can be written
-	if err := cr.refreshCAAndServerCertIfNeeded(); err != nil {
+	// can be bootstrapped, otherwise mgr exits before a cert can be written
+	crLog.Info("starting cert rotator controller")
+	defer crLog.Info("stopping cert rotator controller")
+	if err := cr.refreshCertsInMemory(); err != nil {
 		crLog.Error(err, "could not refresh cert on startup")
 		return err
 	}
 
 	close(cr.Ready)
 
-	cr.TriggerCARotation = make(chan struct{}, 1)
-	defer func() {
-		close(cr.TriggerCARotation)
-	}()
-
+	// TODO implement GC for getting rid of old certs
 	ticker := time.NewTicker(cr.RotationCheckFrequency)
 
 tickerLoop:
 	for {
 		select {
-		case <-cr.TriggerCARotation:
-			cr.Ready = make(chan struct{})
-			if err := cr.refreshCAAndServerCertIfNeeded(); err != nil {
-				crLog.Error(err, "error rotating certs via trigger")
+		case trigger := <-cr.TriggerCARotation:
+			if err := cr.refreshCACertsIfNeeded(); err != nil {
+				crLog.Error(err, "could not refresh cert")
 			}
-			close(cr.Ready)
+			n := len(cr.artifactCaches)
+			secret := cr.artifactCaches[n-1].certSecret
+			trigger.Ready <- &TriggerResult{Secret: secret, Err: nil}
+
 		case <-ticker.C:
-			if err := cr.refreshCAAndServerCertIfNeeded(); err != nil {
-				crLog.Error(err, "error rotating certs via ticker")
+			if err := cr.refreshCACertsIfNeeded(); err != nil {
+				crLog.Error(err, "could not refresh cert")
 			}
+
+			// GC: garbage collect the old CA artifacts
+			for {
+
+				if len(cr.artifactCaches) == 0 {
+					break
+				}
+
+				validUntil := cr.artifactCaches[0].ca.validUntil
+				// we must NOT use cr.lookaheadTime() here
+				if validUntil.Before(time.Now()) {
+					cr.artifactCaches = cr.artifactCaches[1:]
+					for namespace := range cr.knownNamespaceTLSMap {
+						err := cr.writer.Delete(context.TODO(), &corev1.Secret{
+							ObjectMeta: metav1.ObjectMeta{
+								Namespace: namespace,
+								Name:      fmt.Sprintf("%s-%d", infrav1.RunnerTLSSecretName, validUntil.Unix()),
+							},
+						}, client.PropagationPolicy(metav1.DeletePropagationBackground))
+						if err != nil {
+							crLog.Error(err, "could not delete old CA artifact")
+						}
+					}
+				} else {
+					break
+				}
+			}
+
+		case trigger := <-cr.TriggerNamespaceTLSGeneration:
+			namespace := trigger.Namespace
+			if _, ok := cr.knownNamespaceTLSMap[namespace]; !ok {
+				secret, err := cr.generateNamespaceTLS(namespace)
+				if err != nil {
+					crLog.Error(err, "error generating TLS for namespace %s", namespace)
+				}
+				cr.knownNamespaceTLSMap[namespace] = &TriggerResult{Secret: secret, Err: err}
+			} else {
+				crLog.Info("TLS for namespace %s already generated", namespace)
+			}
+			trigger.Ready <- cr.knownNamespaceTLSMap[namespace]
+
 		case <-ctx.Done():
 			break tickerLoop
 		}
 	}
 
 	ticker.Stop()
+	//close(cr.TriggerCARotation)
+	//close(cr.TriggerNamespaceTLSGeneration)
 	return nil
 }
 
-func (cr *CertRotator) IsCertReady(ctx context.Context) bool {
-	secret := &corev1.Secret{}
-	if err := cr.client.Get(ctx, cr.SecretKey, secret); err != nil {
-		return false
+func (cr *CertRotator) refreshCACertsIfNeeded() error {
+	needRegeneration := false
+	// if there is no CA artifact, refresh certs
+	n := len(cr.artifactCaches)
+	if n == 0 {
+		crLog.Info("no CA in the cache")
+		if err := cr.refreshCertsInMemory(); err != nil {
+			return err
+		} else {
+			needRegeneration = true
+		}
+	} else if n > 0 {
+		validUntil := cr.artifactCaches[n-1].ca.validUntil
+		if validUntil.Before(cr.lookaheadTime()) {
+			if err := cr.refreshCertsInMemory(); err != nil {
+				return err
+			} else {
+				needRegeneration = true
+			}
+		}
 	}
 
-	if secret.Data == nil || !cr.validCACert(secret.Data[caCertName], secret.Data[caKeyName]) {
-		return false
+	if needRegeneration {
+		// generate new certs for all namespaces
+		for namespace := range cr.knownNamespaceTLSMap {
+			secret, err := cr.generateNamespaceTLS(namespace)
+			if err != nil {
+				crLog.Error(err, "could not generate TLS for namespace")
+			}
+			cr.knownNamespaceTLSMap[namespace] = &TriggerResult{Secret: secret, Err: err}
+		}
 	}
 
-	if !cr.validServerCert(secret.Data[caCertName], secret.Data[certName], secret.Data[keyName]) {
-		return false
-	}
-
-	return true
+	return nil
 }
 
-// refreshCAAndServerCertIfNeeded returns whether there's any error when refreshing the certs if needed.
-func (cr *CertRotator) refreshCAAndServerCertIfNeeded() error {
-	refreshFn := func() (bool, error) {
-		ctx := context.Background()
-
-		caCertSecret := &corev1.Secret{}
-		if err := cr.client.Get(ctx, cr.SecretKey, caCertSecret); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return false, errors.Wrap(err, "acquiring secret to update certificates")
-			}
-			caCertSecret.ObjectMeta = metav1.ObjectMeta{
-				Name:      cr.SecretKey.Name,
-				Namespace: cr.SecretKey.Namespace,
-			}
-			if err := cr.client.Create(ctx, caCertSecret); err != nil {
-				return false, errors.Wrap(err, "creating secret to update certificates")
-			}
-		}
-
-		if caCertSecret.Data == nil {
-			crLog.Info("creating CA and server certs")
-			if err := cr.refreshCerts(ctx, true, caCertSecret); err != nil {
-				crLog.Error(err, "could not refresh CA and server certs")
-				return false, nil
-			}
-			crLog.Info("CA and server certs created")
-			return true, nil
-		}
-
-		if !cr.validCACert(caCertSecret.Data[caCertName], caCertSecret.Data[caKeyName]) {
-			crLog.Info("refreshing CA and server certs")
-			if err := cr.refreshCerts(ctx, true, caCertSecret); err != nil {
-				crLog.Error(err, "could not refresh CA and server certs")
-				return false, nil
-			}
-			crLog.Info("CA and server certs refreshed")
-			return true, nil
-		}
-
-		if !cr.validServerCert(caCertSecret.Data[caCertName], caCertSecret.Data[certName], caCertSecret.Data[keyName]) {
-			crLog.Info("refreshing server certs")
-			if err := cr.refreshCerts(ctx, false, caCertSecret); err != nil {
-				crLog.Error(err, "could not refresh server certs")
-				return false, nil
-			}
-			crLog.Info("server certs refreshed")
-			return true, nil
-		}
-
-		crLog.Info("no CA or server cert refresh needed")
-
-		return true, nil
+// GetRunnerTLSSecretName returns the name of the TLS Secret.
+// It is used by the controller to tell the runner the name of TLS.
+func (cr *CertRotator) GetRunnerTLSSecretName() (string, error) {
+	n := len(cr.artifactCaches)
+	if n == 0 {
+		return "", errors.New("no CA in the cache")
 	}
 
-	if err := wait.ExponentialBackoff(wait.Backoff{
-		Duration: 10 * time.Minute,
-		Factor:   2,
-		Jitter:   1,
-		Steps:    10,
-	}, refreshFn); err != nil {
+	caArtifacts := cr.artifactCaches[n-1].ca
+	return fmt.Sprintf("%s-%d", infrav1.RunnerTLSSecretName, caArtifacts.validUntil.Unix()), nil
+}
+
+func (cr *CertRotator) refreshCertsInMemory() error {
+	var caArtifacts *KeyPairArtifacts
+	now := time.Now()
+	begin := now.Add(-1 * time.Hour)
+	end := now.Add(cr.CAValidityDuration)
+
+	var err error
+	caArtifacts, err = cr.createCACert(begin, end)
+	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-// refreshCerts refreshes the certs. If refreshCA is true the CA cert will be refreshed and the server certs will be rotated. We also kill any runner pods so that they will be recreated and pick new certs.
-func (cr *CertRotator) refreshCerts(ctx context.Context, refreshCA bool, secret *corev1.Secret) error {
-	var (
-		caArtifacts *KeyPairArtifacts
-		err         error
-	)
-
-	now := time.Now()
-	begin := now.Add(-1 * time.Hour)
-	end := now.Add(cr.CertValidityDuration)
-
-	if refreshCA {
-		var err error
-		caArtifacts, err = cr.createCACert(begin, now.Add(cr.CAValidityDuration))
-		if err != nil {
-			return err
-		}
-
-		secrets := &corev1.SecretList{}
-		if err := cr.client.List(ctx, secrets, client.HasLabels([]string{infrav1.RunnerLabel})); err != nil {
-			return fmt.Errorf("listing secrets to refresh certificates: %w", err)
-		}
-
-		for _, runnerSecret := range secrets.Items {
-			certArtifacts, err := parseArtifacts("tls.crt", "tls.key", &runnerSecret)
-			if err != nil {
-				return err
-			}
-
-			hostname := certArtifacts.Cert.DNSNames[0]
-
-			cert, key, err := cr.createCertPEM(caArtifacts, hostname, begin, end)
-			if err != nil {
-				return err
-			}
-
-			if err := cr.updateSecret(ctx, cert, key, caArtifacts, &runnerSecret); err != nil {
-				return err
-			}
-		}
-	} else {
-		caArtifacts, err = parseArtifacts(caCertName, caKeyName, secret)
-		if err != nil {
-			return err
-		}
-	}
-
+	// create controller-side certificate
 	cert, key, err := cr.createCertPEM(caArtifacts, cr.DNSName, begin, end)
 	if err != nil {
 		return err
 	}
 
-	if err := cr.updateSecret(ctx, cert, key, caArtifacts, secret); err != nil {
-		return err
+	secret := &corev1.Secret{
+		Data: map[string][]byte{
+			caCertName: caArtifacts.CertPEM,
+			caKeyName:  caArtifacts.KeyPEM,
+			certName:   cert,
+			keyName:    key,
+		},
 	}
+
+	cr.artifactCaches = append(cr.artifactCaches, &artifact{
+		ca:         caArtifacts,
+		certSecret: secret,
+	})
 
 	return nil
 }
 
-func (cr *CertRotator) GenerateRunnerCertForNamespace(ctx context.Context, namespace string, tlsCertSecret *corev1.Secret) error {
-	hostname := fmt.Sprintf("*.%s.pod.cluster.local", namespace)
-
-	if err := cr.client.Get(ctx, client.ObjectKeyFromObject(tlsCertSecret), tlsCertSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-
-		// create the runner tls secret
-		if err := cr.client.Create(ctx, tlsCertSecret); err != nil {
-			return err
-		}
-	}
-
-	// Validity is from -1 to cr.CertValidityDuration
-	now := time.Now()
-	begin := now.Add(-1 * time.Hour)
-	end := now.Add(cr.CertValidityDuration)
-
-	var caSecret corev1.Secret
-	if err := cr.client.Get(ctx, cr.SecretKey, &caSecret); err != nil {
-		return err
-	}
-
-	caArtifacts, err := parseArtifacts(caCertName, caKeyName, &caSecret)
-	if err != nil {
-		return err
-	}
-
-	cert, key, err := cr.createCertPEM(caArtifacts, hostname, begin, end)
-	if err != nil {
-		return err
-	}
-
-	if err := cr.updateSecret(ctx, cert, key, caArtifacts, tlsCertSecret); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (cr *CertRotator) updateSecret(ctx context.Context, cert, key []byte, caArtifacts *KeyPairArtifacts, secret *corev1.Secret) error {
-	if secret.Data == nil {
-		secret.Data = make(map[string][]byte)
-	}
-
-	secret.Data[caCertName] = caArtifacts.CertPEM
-	secret.Data[caKeyName] = caArtifacts.KeyPEM
-	secret.Data[certName] = cert
-	secret.Data[keyName] = key
-
-	return cr.client.Update(ctx, secret)
-}
-
-func buildArtifactsFromSecret(secret *corev1.Secret) (*KeyPairArtifacts, *KeyPairArtifacts, error) {
-	caArtifacts, err := parseArtifacts(caCertName, caKeyName, secret)
+func buildArtifactsFromSecret(secret *corev1.Secret) (caArtifacts *KeyPairArtifacts, certArtifacts *KeyPairArtifacts, err error) {
+	caArtifacts, err = parseArtifacts(caCertName, caKeyName, secret)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	certArtifacts, err := parseArtifacts(certName, keyName, secret)
+	certArtifacts, err = parseArtifacts(certName, keyName, secret)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -346,12 +333,12 @@ func buildArtifactsFromSecret(secret *corev1.Secret) (*KeyPairArtifacts, *KeyPai
 func parseArtifacts(certName, keyName string, secret *corev1.Secret) (*KeyPairArtifacts, error) {
 	certPem, ok := secret.Data[certName]
 	if !ok {
-		return nil, errors.New(fmt.Sprintf("Cert secret is not well-formed, missing %s", caCertName))
+		return nil, errors.New(fmt.Sprintf("Cert Secret is not well-formed, missing %s", caCertName))
 	}
 
 	keyPem, ok := secret.Data[keyName]
 	if !ok {
-		return nil, errors.New(fmt.Sprintf("Cert secret is not well-formed, missing %s", caKeyName))
+		return nil, errors.New(fmt.Sprintf("Cert Secret is not well-formed, missing %s", caKeyName))
 	}
 
 	certDer, _ := pem.Decode(certPem)
@@ -383,17 +370,17 @@ func parseArtifacts(certName, keyName string, secret *corev1.Secret) (*KeyPairAr
 
 }
 
-// CreateCACert creates the self-signed CA cert and private key that will
+// createCACert creates the self-signed CA cert and private key that will
 // be used to sign the server certificate
 func (cr *CertRotator) createCACert(begin, end time.Time) (*KeyPairArtifacts, error) {
-	certificateTemplate := &x509.Certificate{
+	certTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(0),
 		Subject: pkix.Name{
 			CommonName:   cr.CAName,
 			Organization: []string{cr.CAOrganization},
 		},
 		DNSNames: []string{
-			cr.DNSName,
+			cr.CAName,
 		},
 		NotBefore:             begin,
 		NotAfter:              end,
@@ -401,42 +388,38 @@ func (cr *CertRotator) createCACert(begin, end time.Time) (*KeyPairArtifacts, er
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}
-
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, errors.Wrap(err, "generating key")
 	}
-
-	der, err := x509.CreateCertificate(rand.Reader, certificateTemplate, certificateTemplate, key.Public(), key)
+	der, err := x509.CreateCertificate(rand.Reader, certTemplate, certTemplate, key.Public(), key)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating certificate")
 	}
-
 	certPEM, keyPEM, err := pemEncode(der, key)
 	if err != nil {
 		return nil, errors.Wrap(err, "encoding PEM")
 	}
-
 	cert, err := x509.ParseCertificate(der)
 	if err != nil {
 		return nil, errors.Wrap(err, "parsing certificate")
 	}
 
-	return &KeyPairArtifacts{Cert: cert, Key: key, CertPEM: certPEM, KeyPEM: keyPEM}, nil
+	return &KeyPairArtifacts{Cert: cert, Key: key, CertPEM: certPEM, KeyPEM: keyPEM, validUntil: end}, nil
 }
 
-// CreateCertPEM takes the results of CreateCACert and uses it to create the
-// PEM-encoded public certificate and private key, respectively
+// createCertPEM takes the results of createCACert and uses it to create the
+// PEM-encoded public certificate and private key, respectively.
 func (cr *CertRotator) createCertPEM(ca *KeyPairArtifacts, hostname string, begin, end time.Time) ([]byte, []byte, error) {
 	dnsNames := []string{hostname}
 	if os.Getenv("INSECURE_LOCAL_RUNNER") == "1" {
 		dnsNames = append(dnsNames, "localhost")
 	}
 
-	certificateTemplate := &x509.Certificate{
+	certTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			CommonName: cr.CAName,
+			CommonName: cr.DNSName,
 		},
 		DNSNames:              dnsNames,
 		NotBefore:             begin,
@@ -445,22 +428,18 @@ func (cr *CertRotator) createCertPEM(ca *KeyPairArtifacts, hostname string, begi
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 	}
-
-	key, err := rsa.GenerateKey(rand.Reader, 4096)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "generating key")
 	}
-
-	der, err := x509.CreateCertificate(rand.Reader, certificateTemplate, ca.Cert, key.Public(), ca.Key)
+	der, err := x509.CreateCertificate(rand.Reader, certTemplate, ca.Cert, key.Public(), ca.Key)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "creating certificate")
 	}
-
 	certPEM, keyPEM, err := pemEncode(der, key)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "encoding PEM")
 	}
-
 	return certPEM, keyPEM, nil
 }
 
@@ -470,17 +449,75 @@ func pemEncode(certificateDER []byte, key *rsa.PrivateKey) ([]byte, []byte, erro
 	if err := pem.Encode(certBuf, &pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}); err != nil {
 		return nil, nil, errors.Wrap(err, "encoding cert")
 	}
-
 	keyBuf := &bytes.Buffer{}
 	if err := pem.Encode(keyBuf, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
 		return nil, nil, errors.Wrap(err, "encoding key")
 	}
-
 	return certBuf.Bytes(), keyBuf.Bytes(), nil
 }
 
-// ValidCert verifies if the cert is valid for the given hostname and time
-func ValidCert(caCert, cert, key []byte, dnsName string, at time.Time) (bool, error) {
+func (cr *CertRotator) lookaheadTime() time.Time {
+	return time.Now().Add(cr.LookaheadInterval)
+}
+
+func (cr *CertRotator) validServerCert(caCert, cert, key []byte) bool {
+	valid, err := ValidCert(caCert, cert, key, cr.DNSName, cr.extKeyUsages, cr.lookaheadTime())
+	if err != nil {
+		return false
+	}
+	return valid
+}
+
+func (cr *CertRotator) validCACert(cert, key []byte) bool {
+	valid, err := ValidCert(cert, cert, key, cr.CAName, nil, cr.lookaheadTime())
+	if err != nil {
+		return false
+	}
+	return valid
+}
+
+func (cr *CertRotator) generateNamespaceTLS(namespace string) (*corev1.Secret, error) {
+	n := len(cr.artifactCaches)
+	// get last artifact cache
+	artifactCache := cr.artifactCaches[n-1]
+	caArtifacts := artifactCache.ca
+
+	hostname := fmt.Sprintf("*.%s.pod.cluster.local", namespace)
+	cert, key, err := cr.createCertPEM(caArtifacts, hostname, time.Now().Add(-1*time.Hour), caArtifacts.validUntil)
+	if err != nil {
+		return nil, err
+	}
+
+	name := fmt.Sprintf("%s-%d", infrav1.RunnerTLSSecretName, caArtifacts.validUntil.Unix())
+	tlsCertSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+			Labels: map[string]string{
+				infrav1.RunnerLabel: "true",
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			caCertName: caArtifacts.CertPEM,
+			caKeyName:  caArtifacts.KeyPEM,
+			certName:   cert,
+			keyName:    key,
+		},
+	}
+
+	if err := cr.writer.Create(context.TODO(), tlsCertSecret); err != nil {
+		return nil, err
+	}
+
+	return tlsCertSecret, nil
+}
+
+func (cr *CertRotator) ResetCACache() {
+	cr.artifactCaches = []*artifact{}
+}
+
+func ValidCert(caCert, cert, key []byte, dnsName string, keyUsages *[]x509.ExtKeyUsage, at time.Time) (bool, error) {
 	if len(caCert) == 0 || len(cert) == 0 || len(key) == 0 {
 		return false, errors.New("empty cert")
 	}
@@ -490,7 +527,6 @@ func ValidCert(caCert, cert, key []byte, dnsName string, at time.Time) (bool, er
 	if caDer == nil {
 		return false, errors.New("bad CA cert")
 	}
-
 	cac, err := x509.ParseCertificate(caDer.Bytes)
 	if err != nil {
 		return false, errors.Wrap(err, "parsing CA cert")
@@ -512,34 +548,18 @@ func ValidCert(caCert, cert, key []byte, dnsName string, at time.Time) (bool, er
 		return false, errors.Wrap(err, "parsing cert")
 	}
 
-	_, err = crt.Verify(x509.VerifyOptions{
+	opt := x509.VerifyOptions{
 		DNSName:     dnsName,
 		Roots:       pool,
 		CurrentTime: at,
-	})
+	}
+	if keyUsages != nil {
+		opt.KeyUsages = *keyUsages
+	}
+
+	_, err = crt.Verify(opt)
 	if err != nil {
 		return false, errors.Wrap(err, "verifying cert")
 	}
-
 	return true, nil
-}
-
-func (cr *CertRotator) validCACert(cert, key []byte) bool {
-	valid, err := ValidCert(cert, cert, key, cr.CAName, cr.lookaheadTime())
-	if err != nil {
-		return false
-	}
-	return valid
-}
-
-func (cr *CertRotator) validServerCert(caCert, cert, key []byte) bool {
-	valid, err := ValidCert(caCert, cert, key, cr.DNSName, cr.lookaheadTime())
-	if err != nil {
-		return false
-	}
-	return valid
-}
-
-func (cr *CertRotator) lookaheadTime() time.Time {
-	return time.Now().Add(cr.LookaheadInterval)
 }

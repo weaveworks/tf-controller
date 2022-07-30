@@ -47,10 +47,12 @@ var (
 
 func main() {
 	var (
-		grpcPort int
+		grpcPort      int
+		tlsSecretName string
 	)
 
 	flag.IntVar(&grpcPort, "grpc-port", 30000, "The port on which to expose the grpc endpoint.")
+	flag.StringVar(&tlsSecretName, "tls-secret-name", "", "The TLS secret name.")
 	flag.Parse()
 
 	addr := fmt.Sprintf(":%d", grpcPort)
@@ -73,7 +75,7 @@ func main() {
 		signal.Stop(sigterm)
 	}()
 
-	err := mtls.RunnerServe(podNamespace, addr, sigterm)
+	err := mtls.RunnerServe(podNamespace, addr, tlsSecretName, sigterm)
 	if err != nil {
 		log.Fatal(err.Error())
 	}

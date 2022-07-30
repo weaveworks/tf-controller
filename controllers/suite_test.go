@@ -32,7 +32,6 @@ import (
 	"github.com/weaveworks/tf-controller/mtls"
 	"github.com/weaveworks/tf-controller/runner"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
 	"github.com/onsi/gomega/ghttp"
@@ -91,8 +90,9 @@ func TestMain(m *testing.M) {
 	ctx, cancel = context.WithCancel(context.TODO())
 	// "bootstrapping test environment"
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "config", "crd", "bases")},
-		ErrorIfCRDPathMissing: true,
+		CRDDirectoryPaths:       []string{filepath.Join("..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing:   true,
+		ControlPlaneStopTimeout: 60 * time.Second,
 	}
 
 	cfg, err := testEnv.Start()
@@ -204,18 +204,15 @@ func TestMain(m *testing.M) {
 	certsReady := make(chan struct{})
 
 	rotator = &mtls.CertRotator{
-		CAName:         "localhost",
-		CAOrganization: "localhost",
-		DNSName:        "localhost",
-		SecretKey: types.NamespacedName{
-			Namespace: "flux-system",
-			Name:      "tf-controller.tls",
-		},
-		Ready:                  certsReady,
-		CAValidityDuration:     time.Hour * 24 * 7,
-		CertValidityDuration:   5*time.Minute + 1*time.Hour, // since the cert lookaheadInterval is set to 1 hour, using 1hr5m so that the cert is valid for 5 mins
-		RotationCheckFrequency: 10 * time.Second,
-		LookaheadInterval:      1 * time.Hour,
+		Ready:                         certsReady,
+		CAName:                        "localhost",
+		CAOrganization:                "localhost",
+		DNSName:                       "localhost",
+		CAValidityDuration:            time.Hour * 24 * 7,
+		RotationCheckFrequency:        10 * time.Second,
+		LookaheadInterval:             1 * time.Hour,
+		TriggerCARotation:             make(chan mtls.Trigger),
+		TriggerNamespaceTLSGeneration: make(chan mtls.Trigger),
 	}
 
 	if err := mtls.AddRotator(ctx, k8sManager, rotator); err != nil {
@@ -237,27 +234,36 @@ func TestMain(m *testing.M) {
 		panic(err.Error())
 	}
 
+	stopRunnerServer := make(chan os.Signal)
 	runnerServer = &runner.TerraformRunnerServer{
 		Client: k8sManager.GetClient(),
 		Scheme: k8sManager.GetScheme(),
+		Done:   stopRunnerServer,
 	}
 
-	go mtls.StartGRPCServerForTesting(ctx, runnerServer, "flux-system", "localhost:30000", k8sManager, rotator)
+	go func() {
+		err := mtls.StartGRPCServerForTesting(runnerServer, "flux-system", "localhost:30000", k8sManager, rotator)
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+	}()
 
 	go func() {
 		if err := k8sManager.Start(ctx); err != nil {
-			panic(err.Error())
+			fmt.Println(err.Error())
 		}
 	}()
 
 	code := m.Run()
-	cancel()
+	// stopRunnerServer <- os.Interrupt
 	server.Close()
+	cancel()
+	close(stopRunnerServer)
 
 	// "tearing down the test environment"
 	err = testEnv.Stop()
 	if err != nil {
-		panic(err.Error())
+		fmt.Println(err.Error())
 	}
 
 	os.Exit(code)

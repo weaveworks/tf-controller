@@ -24,13 +24,13 @@ COPY utils/ utils/
 # Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o tf-controller cmd/manager/main.go
 
-FROM alpine:3.15.3
+FROM alpine:3.16
 
 LABEL org.opencontainers.image.source="https://github.com/weaveworks/tf-controller"
 
 RUN apk add --no-cache ca-certificates tini git openssh-client gnupg && \
-    apk add --no-cache libretls=3.3.4-r3 && \
-    apk add --no-cache busybox=1.34.1-r5
+    apk add --no-cache libretls && \
+    apk add --no-cache busybox
 
 COPY --from=builder /workspace/tf-controller /usr/local/bin/
 

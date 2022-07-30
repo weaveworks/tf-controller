@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func RunnerServe(namespace, addr string, sigterm chan os.Signal) error {
+func RunnerServe(namespace, addr string, tlsSecretName string, sigterm chan os.Signal) error {
 	scheme := runtime.NewScheme()
 
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -52,8 +52,8 @@ func RunnerServe(namespace, addr string, sigterm chan os.Signal) error {
 		return err
 	}
 
-	secretKey := types.NamespacedName{Namespace: namespace, Name: infrav1.RunnerTLSSecretName}
-	// TODO watch this secret, then restart the server if the secret is changed
+	secretKey := types.NamespacedName{Namespace: namespace, Name: tlsSecretName}
+	// TODO watch this Secret, then restart the server if the Secret is changed
 	tlsSecret := &v1.Secret{}
 	if err := k8sClient.Get(context.Background(), secretKey, tlsSecret); err != nil {
 		return err

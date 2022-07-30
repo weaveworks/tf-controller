@@ -33,6 +33,7 @@ import (
 )
 
 const (
+	CACertSecretName = "tf-controller.tls"
 	// RunnerTLSSecretName is the name of the secret containing a TLS cert that will be written to
 	// the namespace in which a terraform runner is created
 	RunnerTLSSecretName   = "terraform-runner.tls"

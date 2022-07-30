@@ -30,19 +30,14 @@ func Test_009990_mtls_generate_creds_test(t *testing.T) {
 	ctx := context.Background()
 	updatedTime := time.Now()
 
-	By("creating a secret and writing the certs")
-	caSecretKey := types.NamespacedName{
-		Namespace: "flux-system",
-		Name:      "tf-controller.tls",
-	}
-	caSecret := &corev1.Secret{}
-	g.Eventually(func() bool {
-		err := k8sClient.Get(ctx, caSecretKey, caSecret)
-		if err != nil {
-			return false
-		}
-		return len(caSecret.Data) == 4
-	}, timeout, interval).Should(BeTrue())
+	rotator.ResetCACache()
+	readyCh := make(chan *mtls.TriggerResult)
+	rotator.TriggerCARotation <- mtls.Trigger{Namespace: "", Ready: readyCh}
+	result := <-readyCh
+	g.Expect(result.Err).To(BeNil())
+
+	caSecret := result.Secret
+	g.Expect(len(caSecret.Data)).To(Equal(4))
 
 	It("should create the ca and runner certs")
 	g.Expect(caSecret.Data).Should(HaveKey("ca.crt"))
@@ -126,8 +121,12 @@ func Test_009990_mtls_generate_creds_test(t *testing.T) {
 	}, timeout, interval).Should(BeTrue())
 
 	By("checking that the runner secret gets created")
+
+	secretName, err := rotator.GetRunnerTLSSecretName()
+	g.Expect(err).Should(Succeed())
+
 	runnerSecret := &corev1.Secret{}
-	runnerSecretKey := types.NamespacedName{Namespace: "flux-system", Name: infrav1.RunnerTLSSecretName}
+	runnerSecretKey := types.NamespacedName{Namespace: "flux-system", Name: secretName}
 	g.Eventually(func() bool {
 		err := k8sClient.Get(ctx, runnerSecretKey, runnerSecret)
 		if err != nil {
@@ -139,7 +138,7 @@ func Test_009990_mtls_generate_creds_test(t *testing.T) {
 	By("verifying that the certificate authority cert is valid")
 	caCert := runnerSecret.Data["ca.crt"]
 	caKey := runnerSecret.Data["ca.key"]
-	caValid, err := mtls.ValidCert(caCert, caCert, caKey, rotator.CAName, time.Now())
+	caValid, err := mtls.ValidCert(caCert, caCert, caKey, rotator.CAName, nil, time.Now())
 	g.Expect(err).To(BeNil())
 	g.Expect(caValid).To(BeTrue())
 
@@ -152,35 +151,35 @@ func Test_009990_mtls_generate_creds_test(t *testing.T) {
 	tlsKey := runnerSecret.Data["tls.key"]
 	for _, ip := range []string{"172-1-0-1", "172-10-0-2", "172-127-0-3"} {
 		hostname := fmt.Sprintf("%s.flux-system.pod.cluster.local", ip)
-		tlsValid, err := mtls.ValidCert(caCert, tlsCert, tlsKey, hostname, time.Now())
+		tlsValid, err := mtls.ValidCert(caCert, tlsCert, tlsKey, hostname, nil, time.Now())
 		g.Expect(err).To(BeNil())
 		g.Expect(tlsValid).To(BeTrue())
 	}
 
 	By("verifying that the runner cert is valid only for the terraform runner namespace")
 	hostname := "172-1-0-1.kube-system.pod.cluster.local"
-	tlsValid, err := mtls.ValidCert(caCert, tlsCert, tlsKey, hostname, time.Now())
+	tlsValid, err := mtls.ValidCert(caCert, tlsCert, tlsKey, hostname, nil, time.Now())
 	g.Expect(err).ToNot(BeNil())
 	g.Expect(tlsValid).To(BeFalse())
 
 	By("rotating the CA should renew the server cert")
-	g.Expect(k8sClient.Delete(ctx, caSecret)).To(BeNil())
-
-	renewedCaSecret := &corev1.Secret{}
-	g.Eventually(func() bool {
-		err := k8sClient.Get(ctx, caSecretKey, renewedCaSecret)
-		if err != nil {
-			return false
-		}
-		return len(renewedCaSecret.Data) == 4
-	}, timeout, interval).Should(BeTrue())
+	rotator.ResetCACache()
+	renewedReadyCh := make(chan *mtls.TriggerResult)
+	rotator.TriggerCARotation <- mtls.Trigger{Namespace: "", Ready: renewedReadyCh}
+	renewedResult := <-renewedReadyCh
+	renewedCaSecret := renewedResult.Secret
 
 	g.Expect(bytes.Compare(caSecret.Data["ca.crt"], renewedCaSecret.Data["ca.crt"])).ToNot(BeZero())
 
 	By("checking that the runner secret gets updated")
+
+	renewedSecretName, err := rotator.GetRunnerTLSSecretName()
+	g.Expect(err).Should(Succeed())
+	renewedRunnerSecretKey := types.NamespacedName{Namespace: "flux-system", Name: renewedSecretName}
+
 	updatedRunnerSecret := &corev1.Secret{}
 	g.Eventually(func() int {
-		err := k8sClient.Get(ctx, runnerSecretKey, updatedRunnerSecret)
+		err := k8sClient.Get(ctx, renewedRunnerSecretKey, updatedRunnerSecret)
 		if err != nil {
 			return 1
 		}
@@ -194,7 +193,7 @@ func Test_009990_mtls_generate_creds_test(t *testing.T) {
 	caCert = renewedCaSecret.Data["ca.crt"]
 	tlsCert = updatedRunnerSecret.Data["tls.crt"]
 	tlsKey = updatedRunnerSecret.Data["tls.key"]
-	tlsValid, err = mtls.ValidCert(caCert, tlsCert, tlsKey, hostname, time.Now())
+	tlsValid, err = mtls.ValidCert(caCert, tlsCert, tlsKey, hostname, nil, time.Now())
 	g.Expect(err).To(BeNil())
-	g.Expect(tlsValid).To((BeTrue()))
+	g.Expect(tlsValid).To(BeTrue())
 }

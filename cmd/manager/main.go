@@ -33,7 +33,6 @@ import (
 	infrav1 "github.com/weaveworks/tf-controller/api/v1alpha1"
 	"github.com/weaveworks/tf-controller/controllers"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -143,17 +142,15 @@ func main() {
 
 	certsReady := make(chan struct{})
 	rotator := &mtls.CertRotator{
-		CAName:         "tf-controller",
-		CAOrganization: "weaveworks",
-		DNSName:        "tf-controller",
-		SecretKey: types.NamespacedName{
-			Namespace: runtimeNamespace,
-			Name:      "tf-controller.tls",
-		},
-		Ready:                  certsReady,
-		CAValidityDuration:     caValidityDuration,
-		CertValidityDuration:   certValidityDuration,
-		RotationCheckFrequency: rotationCheckFrequency,
+		Ready:                         certsReady,
+		CAName:                        "tf-controller",
+		CAOrganization:                "weaveworks",
+		DNSName:                       "tf-controller",
+		CAValidityDuration:            caValidityDuration,
+		RotationCheckFrequency:        rotationCheckFrequency,
+		LookaheadInterval:             2 * time.Hour,
+		TriggerCARotation:             make(chan mtls.Trigger),
+		TriggerNamespaceTLSGeneration: make(chan mtls.Trigger),
 	}
 
 	const localHost = "localhost"
@@ -189,7 +186,13 @@ func main() {
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),
 		}
-		go mtls.StartGRPCServerForTesting(signalHandlerContext, runnerServer, "flux-system", "localhost:30000", mgr, rotator)
+		go func() {
+			err := mtls.StartGRPCServerForTesting(runnerServer, "flux-system", "localhost:30000", mgr, rotator)
+			if err != nil {
+				setupLog.Error(err, "unable to start runner server")
+				os.Exit(1)
+			}
+		}()
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
